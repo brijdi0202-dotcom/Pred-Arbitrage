@@ -1,0 +1,125 @@
+import os
+import requests
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import OrderArgs, OrderType
+from py_clob_client.order_builder.constants import BUY, SELL
+
+# ==========================================
+# CONFIGURATION
+# ==========================================
+
+# 1. MARKET DETAILS
+MARKET_SLUG = "bitcoin-up-or-down-december-25-2am-et"
+
+# 2. TRADE DETAILS
+TRADE_SIDE = "YES"        # "YES" or "NO"
+TRADE_PRICE_CENTS = 99.0  # Price in cents (e.g. 99.0 = $0.99)
+TRADE_SIZE_SHARES = 10.0  # Number of shares
+
+# 3. AUTHENTICATION
+PRIVATE_KEY = "0xfcd0b1326069e4d9353a7cdb26be8d0e1322c74b0093d81289df328d28363a83"
+CHAIN_ID = 137
+HOST = "https://clob.polymarket.com"
+PROXY_ADDRESS = "0x4e960c291e82600da75820951ccf4992a98f2613"
+
+# ==========================================
+# SETUP
+# ==========================================
+
+def get_client():
+    try:
+        client = ClobClient(HOST, key=PRIVATE_KEY, chain_id=CHAIN_ID, signature_type=1, funder=PROXY_ADDRESS)
+        client.set_api_creds(client.create_or_derive_api_creds())
+        return client
+    except Exception as e:
+        print(f"❌ Error initializing client: {e}")
+        return None
+
+# ==========================================
+# HELPERS
+# ==========================================
+
+def get_token_id(slug):
+    """Fetch the Token ID for the given market slug and side."""
+    print(f"🔎 Fetching Token ID for {slug} ({TRADE_SIDE})...")
+    try:
+        # Gamma API to get market details
+        url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
+        resp = requests.get(url).json()
+        
+        # Handle list or dict response
+        if isinstance(resp, list):
+            market = resp[0] if resp else None
+        elif isinstance(resp, dict):
+            # Check if it's a wrapper like {'data': [...]} or just the market
+            if "markets" in resp: market = resp["markets"][0]
+            elif "data" in resp: market = resp["data"][0]
+            else: market = resp
+        else:
+            market = None
+
+        if not market:
+            raise Exception("Market not found")
+
+        # Extract Token ID based on side
+        # clobTokenIds is usually [token_id_no, token_id_yes] (check this assumption or use JSON keys)
+        # Actually, let's look for 'clobTokenIds' which is often a JSON string or list
+        
+        clob_ids = market.get("clobTokenIds")
+        if isinstance(clob_ids, str):
+            import json
+            clob_ids = json.loads(clob_ids)
+            
+        if not clob_ids or len(clob_ids) < 2:
+            raise Exception("Invalid clobTokenIds found")
+
+        # Usually index 0 is NO (Long NO / Short YES) and index 1 is YES (Long YES / Short NO)
+        # But let's verify if possible. For now, standard is 0=NO, 1=YES for binary markets.
+        token_id = clob_ids[1] if TRADE_SIDE.upper() == "YES" else clob_ids[0]
+        
+        print(f"✅ Found Token ID: {token_id}")
+        return token_id
+
+    except Exception as e:
+        print(f"❌ Error fetching Token ID: {e}")
+        return None
+
+# ==========================================
+# EXECUTION
+# ==========================================
+
+def execute_trade():
+    print(f"\n🚀 STARTING TRADE: {TRADE_SIDE} {TRADE_SIZE_SHARES} shares @ {TRADE_PRICE_CENTS}¢")
+    
+    try:
+        # 1. Initialize Client
+        client = get_client()
+        if not client: return
+
+        # 2. Get Token ID
+        token_id = get_token_id(MARKET_SLUG)
+        if not token_id: return
+
+        # 3. Prepare Order
+        price = TRADE_PRICE_CENTS / 100.0
+        side = BUY # We are always BUYING the outcome (YES or NO)
+        
+        order_args = OrderArgs(
+            price=price,
+            size=TRADE_SIZE_SHARES,
+            side=side,
+            token_id=token_id,
+        )
+
+        # 4. Sign and Submit
+        print("✍️ Signing and submitting order...")
+        signed_order = client.create_order(order_args)
+        resp = client.post_order(signed_order, OrderType.GTC)
+        
+        print(f"✅ ORDER RESPONSE: {resp}")
+
+    except Exception as e:
+        print(f"❌ ERROR: {e}")
+
+if __name__ == "__main__":
+    execute_trade()
