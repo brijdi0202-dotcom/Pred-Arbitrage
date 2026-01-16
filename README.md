@@ -22,6 +22,8 @@ Built to scale from experiments → real execution
 Modules Explained
 
 🔹 Polymarket.py
+
+
 Core abstraction layer for Polymarket.
 
 Responsibilities:
