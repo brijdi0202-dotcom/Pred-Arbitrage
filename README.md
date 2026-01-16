@@ -90,8 +90,4 @@ Single source of truth for markets.
 
 Contains:
 
--Market IDs
--Outcome definitions
--Metadata used across all strategies
--Consistent references across modules
--Every strategy and execution layer reads from here.
+Market IDs,Outcome definitions,Metadata used across all strategies,Consistent references across modules & every strategy and execution layer reads from here.
