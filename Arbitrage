@@ -1,0 +1,276 @@
+import json
+import time
+import threading
+import requests
+from websocket import WebSocketApp
+import os
+import datetime
+
+# =========================
+# LIMITLESS CONFIG
+# =========================
+LIMITLESS_URL = "wss://ws.limitless.exchange/socket.io/?EIO=4&transport=websocket"
+LIMITLESS_HEADERS = {
+    "Origin": "https://limitless.exchange",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0",
+}
+LIMITLESS_MARKET_SLUG = "dollarbtc-above-dollar8758070-on-dec-25-1500-utc-1766671203603"
+LIMITLESS_NS = "/markets"
+LIMITLESS_YES_ID = None
+LIMITLESS_NO_ID = None
+LIMITLESS_ORDERBOOK = {"yes": [], "no": []}
+
+# =========================
+# POLYMARKET CONFIG
+# =========================
+POLY_MARKET_SLUG = "bitcoin-up-or-down-december-25-9am-et"
+POLY_WSS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+POLY_GAMMA_API = "https://gamma-api.polymarket.com/markets?slug={}"
+POLY_ORDERBOOKS = {"yes": {}, "no": {}}
+POLY_TOKENS = {}
+
+# =========================
+# UTILITY
+# =========================
+def format_price(p):
+    return f"{float(p):.3f}"
+
+def format_size(size):
+    return f"{float(size)/1_000_000:.6f}"
+
+# =========================
+# LIMITLESS FUNCTIONS
+# =========================
+def l_send_connect(ws):
+    ws.send(f"40{LIMITLESS_NS},")
+
+def l_send_subscribe(ws):
+    event = ["subscribe_market_prices", {"marketSlugs": [LIMITLESS_MARKET_SLUG]}]
+    ws.send(f"42{LIMITLESS_NS},{json.dumps(event, separators=(',', ':'))}")
+    print("[Limitless] -> Subscribing...")
+
+def l_on_open(ws):
+    print("[Limitless] WebSocket connected")
+    l_send_connect(ws)
+
+def l_on_message(ws, message):
+    global LIMITLESS_YES_ID, LIMITLESS_NO_ID, LIMITLESS_ORDERBOOK
+    if message == "2":
+        ws.send("3")
+        return
+    if message == "3" or message.startswith(f"40{LIMITLESS_NS},"):
+        return
+    if message.startswith(f"42{LIMITLESS_NS},"):
+        try:
+            json_part = message.split(",", 1)[1]
+            evt = json.loads(json_part)
+            if isinstance(evt, list) and len(evt) >= 1:
+                event_name = evt[0]
+                payload = evt[1] if len(evt) > 1 else None
+
+                if event_name == "system" and isinstance(payload, dict):
+                    if "Successfully registered connection" in payload.get("message", ""):
+                        time.sleep(0.1)
+                        l_send_subscribe(ws)
+
+                if event_name == "orderbookUpdate":
+                    ob = payload.get("orderbook", {})
+                    token_id = ob.get("tokenId")
+                    asks = ob.get("asks", [])
+                    bids = ob.get("bids", [])
+
+                    if not asks or not bids:
+                        return
+
+                    if LIMITLESS_YES_ID is None:
+                        LIMITLESS_YES_ID = token_id
+                    elif LIMITLESS_NO_ID is None and token_id != LIMITLESS_YES_ID:
+                        LIMITLESS_NO_ID = token_id
+
+                    # Store top 3 asks in global dict
+                    LIMITLESS_ORDERBOOK["yes"] = [{"price": float(a["price"]), "size": a["size"]} for a in asks[:3]]
+                    LIMITLESS_ORDERBOOK["no"] = [{"price": 1 - float(b["price"]), "size": b["size"]} for b in bids[:3]]
+
+        except Exception as e:
+            print("[Limitless exception]", e)
+
+def l_on_error(ws, error):
+    print("[Limitless error]", error)
+
+def l_on_close(ws, close_status_code, close_msg):
+    print("[Limitless WebSocket closed]")
+
+def run_limitless():
+    ws = WebSocketApp(
+        LIMITLESS_URL,
+        header=[f"{k}: {v}" for k, v in LIMITLESS_HEADERS.items()],
+        on_open=l_on_open,
+        on_message=l_on_message,
+        on_error=l_on_error,
+        on_close=l_on_close
+    )
+    ws.run_forever()
+
+# =========================
+# POLYMARKET FUNCTIONS
+# =========================
+def fetch_poly_tokens(slug):
+    url = POLY_GAMMA_API.format(slug)
+    print(f"[Polymarket] 🔎 Fetching market data from: {url}")
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        j = resp.json()
+
+        candidates = []
+        if isinstance(j, dict):
+            candidates.append(j)
+            for key in ("markets", "data", "results", "market", "markets_list"):
+                val = j.get(key)
+                if isinstance(val, list):
+                    candidates.extend(val)
+                elif isinstance(val, dict):
+                    candidates.append(val)
+        elif isinstance(j, list):
+            candidates.extend(j)
+
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
+            for key in ("clobTokenIds", "clob_token_ids", "clob_tokens", "tokenIds", "token_ids"):
+                if key in cand:
+                    raw = cand[key]
+                    if isinstance(raw, list):
+                        tokens_list = [str(x) for x in raw]
+                    elif isinstance(raw, str):
+                        try:
+                            parsed = json.loads(raw)
+                            if isinstance(parsed, list):
+                                tokens_list = [str(x) for x in parsed]
+                            else:
+                                tokens_list = [p.strip() for p in raw.strip('[]').split(',') if p.strip()]
+                        except Exception:
+                            tokens_list = [p.strip().strip('\"\'') for p in raw.strip('[]').split(',') if p.strip()]
+                    if len(tokens_list) >= 2:
+                        POLY_TOKENS["yes"] = tokens_list[0]
+                        POLY_TOKENS["no"] = tokens_list[1]
+                        print(f"[Polymarket] ✅ YES token: {POLY_TOKENS['yes']} | NO token: {POLY_TOKENS['no']}")
+                        return
+        print("[Polymarket] ❌ Could not find token IDs")
+    except Exception as e:
+        print(f"[Polymarket] Error fetching token IDs: {e}")
+
+def poly_on_open(ws):
+    print("[Polymarket] Connected to WebSocket")
+    if POLY_TOKENS:
+        ws.send(json.dumps({"type": "market", "assets_ids": list(POLY_TOKENS.values())}))
+        print("[Polymarket] Subscribed to assets:", POLY_TOKENS)
+
+def poly_on_message(ws, message):
+    global POLY_ORDERBOOKS
+    try:
+        data = json.loads(message)
+        if isinstance(data, list):
+            return
+        event_type = data.get("event_type")
+        if event_type == "book":
+            asset_id = data.get("asset_id")
+            side = "yes" if asset_id == POLY_TOKENS.get("yes") else "no"
+            # Convert keys to float
+            POLY_ORDERBOOKS[side] = {float(a["price"]): float(a["size"]) for a in data.get("asks", [])}
+        elif event_type == "price_change":
+            for change in data.get("price_changes", []):
+                if change["side"] != "SELL":
+                    continue
+                price = float(change["price"])
+                size = float(change["size"])
+                side_name = "yes" if change["asset_id"] == POLY_TOKENS.get("yes") else "no"
+                book_side = POLY_ORDERBOOKS[side_name]
+                if size == 0:
+                    book_side.pop(price, None)
+                else:
+                    book_side[price] = size
+    except Exception as e:
+        print("[Polymarket] Error processing message:", e)
+
+
+def poly_on_error(ws, error):
+    print("[Polymarket error]", error)
+
+def poly_on_close(ws, close_status_code, close_msg):
+    print("[Polymarket WebSocket closed]")
+
+def run_polymarket():
+    fetch_poly_tokens(POLY_MARKET_SLUG)
+    ws = WebSocketApp(
+        POLY_WSS_URL,
+        on_open=poly_on_open,
+        on_message=poly_on_message,
+        on_error=poly_on_error,
+        on_close=poly_on_close
+    )
+    ws.run_forever()
+
+# =========================
+# DASHBOARD
+# =========================
+def live_dashboard():
+    while True:
+        os.system('cls' if os.name == 'nt' else 'clear')
+
+        # Limitless
+        l_yes_list = LIMITLESS_ORDERBOOK.get("yes", [])
+        l_no_list = LIMITLESS_ORDERBOOK.get("no", [])
+
+        print("[Limitless] === TOP 3 ASKS ===")
+        
+        yes_str = " | ".join([f"{format_price(item['price'])} ({format_size(item['size']):>12})" for item in l_yes_list]) if l_yes_list else "N/A"
+        print(f"YES: {yes_str}")
+
+        no_str = " | ".join([f"{format_price(item['price'])} ({format_size(item['size']):>12})" for item in l_no_list]) if l_no_list else "N/A"
+        print(f"NO : {no_str}")
+        print("-"*30)
+
+        # Polymarket
+        sorted_yes = sorted(POLY_ORDERBOOKS["yes"].items(), key=lambda x: x[0])[:3]
+        sorted_no  = sorted(POLY_ORDERBOOKS["no"].items(), key=lambda x: x[0])[:3]
+
+        print("[Polymarket] === TOP 3 ASKS ===")
+        
+        p_yes_str = " | ".join([f"{p:.3f} ({s:>12.6f})" for p, s in sorted_yes]) if sorted_yes else "N/A"
+        print(f"YES: {p_yes_str}")
+
+        p_no_str = " | ".join([f"{p:.3f} ({s:>12.6f})" for p, s in sorted_no]) if sorted_no else "N/A"
+        print(f"NO : {p_no_str}")
+        print("-"*30)
+
+        # Check for Arbitrage
+        # 1. Limitless YES + Polymarket NO < 1
+        if l_yes_list and sorted_no:
+            l_yes_price = float(l_yes_list[0]['price'])
+            p_no_price = sorted_no[0][0]
+            if l_yes_price + p_no_price < 1:
+                msg = f"[{datetime.datetime.now()}] ARB FOUND: Limitless YES ({l_yes_price:.3f}) + Poly NO ({p_no_price:.3f}) = {l_yes_price + p_no_price:.3f}"
+                print(f"\033[92m{msg}\033[0m")
+                with open("arbitrage_log.txt", "a") as f:
+                    f.write(msg + "\n")
+
+        # 2. Polymarket YES + Limitless NO < 1
+        if sorted_yes and l_no_list:
+            p_yes_price = sorted_yes[0][0]
+            l_no_price = float(l_no_list[0]['price'])
+            if p_yes_price + l_no_price < 1:
+                msg = f"[{datetime.datetime.now()}] ARB FOUND: Poly YES ({p_yes_price:.3f}) + Limitless NO ({l_no_price:.3f}) = {p_yes_price + l_no_price:.3f}"
+                print(f"\033[92m{msg}\033[0m")
+                with open("arbitrage_log.txt", "a") as f:
+                    f.write(msg + "\n")
+
+        time.sleep(1)
+
+# =========================
+# MAIN
+# =========================
+if __name__ == "__main__":
+    threading.Thread(target=run_limitless, daemon=True).start()
+    threading.Thread(target=run_polymarket, daemon=True).start()
+    live_dashboard()
