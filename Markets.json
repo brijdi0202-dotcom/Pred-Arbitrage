@@ -1,1 +1,12 @@
-
+[
+    {
+        "name": "BTC 10AM ET",
+        "limitless_slug": "dollarbtc-above-dollar8767292-on-dec-25-1600-utc-1766674803277",
+        "poly_slug": "bitcoin-up-or-down-december-25-10am-et"
+    },
+    {
+        "name": "SOL 10AM ET",
+        "limitless_slug": "dollarsol-above-dollar12204-on-dec-25-1600-utc-1766674803270",
+        "poly_slug": "solana-up-or-down-december-25-10am-et"
+    }
+]
