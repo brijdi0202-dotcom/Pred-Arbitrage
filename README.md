@@ -69,18 +69,22 @@ Prevents strategy code from touching execution internals
 🔹 Arbitrage
 
 Arbitrage research and construction.
+
 Responsibilities:
 Cross-market arbitrage
 Intra-market inefficiency detection
 Price discrepancy logic
 Opportunity filtering
+
 Used for spotting:
 mispriced YES/NO pairs
 correlated market inefficiencies
 execution-safe arbitrage paths
 
 🔹 Markets.json
+
 Single source of truth for markets.
+
 Contains:
 Market IDs
 Outcome definitions
