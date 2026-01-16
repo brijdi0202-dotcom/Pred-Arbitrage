@@ -1,0 +1,197 @@
+import requests
+import json
+import time
+from eth_account import Account
+from eth_account.messages import encode_defunct, encode_typed_data
+from web3 import Web3
+
+# ==========================================
+# CONFIGURATION
+# ==========================================
+
+# 1. MARKET DETAILS
+MARKET_SLUG = "jerome-powell-out-as-fed-chair-in-2025-1764855132810"
+
+# 2. TRADE DETAILS
+TRADE_SIDE = "YES"        # "YES" or "NO"
+TRADE_PRICE_CENTS = 0.5   # Price in cents (e.g. 0.5 = $0.005)
+TRADE_SIZE_SHARES = 5     # Number of shares to buy
+
+# 3. AUTHENTICATION
+PRIVATE_KEY = "0x1406aacedb3c4dda002896da6cb85218b055b6515a74ff6e401015b27d8436cf"
+RPC_URL = "https://mainnet.base.org"
+
+# 4. SYSTEM CONSTANTS
+API_BASE_URL = "https://api.limitless.exchange"
+USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+CHAIN_ID = 8453
+
+# ==========================================
+# SETUP
+# ==========================================
+
+w3 = Web3(Web3.HTTPProvider(RPC_URL))
+account = Account.from_key(PRIVATE_KEY)
+
+def get_headers(session_cookie=None):
+    headers = {"Content-Type": "application/json"}
+    if session_cookie:
+        headers["cookie"] = f"limitless_session={session_cookie}"
+    return headers
+
+# ==========================================
+# HELPERS
+# ==========================================
+
+def authenticate():
+    """Login to Limitless and get session cookie."""
+    print(f"🔐 Authenticating {account.address}...")
+    
+    # 1. Get signing message
+    signing_message = requests.get(f"{API_BASE_URL}/auth/signing-message").text
+    
+    # 2. Sign message
+    message = encode_defunct(text=signing_message)
+    signed_message = account.sign_message(message)
+    
+    # 3. Login
+    headers = {
+        "x-account": account.address,
+        "x-signing-message": "0x" + signing_message.encode("utf-8").hex(),
+        "x-signature": signed_message.signature.hex(),
+        "Content-Type": "application/json",
+    }
+    
+    response = requests.post(f"{API_BASE_URL}/auth/login", headers=headers, json={"client": "eoa"})
+    if response.status_code != 200:
+        raise Exception(f"Auth failed: {response.text}")
+        
+    print("✅ Authenticated")
+    return response.cookies.get("limitless_session"), response.json()
+
+def check_and_approve_usdc(spender_address, amount_wei):
+    """Ensure sufficient USDC balance and allowance."""
+    print("\n💰 Checking USDC Balance & Allowance...")
+    
+    usdc = w3.eth.contract(address=USDC_ADDRESS, abi=[
+        {"constant":True,"inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],"name":"allowance","outputs":[{"name":"","type":"uint256"}],"type":"function"},
+        {"constant":False,"inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"name":"approve","outputs":[{"name":"","type":"bool"}],"type":"function"},
+        {"constant":True,"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"type":"function"}
+    ])
+    
+    # Check Balance
+    balance = usdc.functions.balanceOf(account.address).call()
+    if balance < amount_wei:
+        print(f"❌ Insufficient USDC. Have: {balance/1e6}, Need: {amount_wei/1e6}")
+        return False
+        
+    # Check Allowance
+    allowance = usdc.functions.allowance(account.address, spender_address).call()
+    if allowance < amount_wei:
+        print(f"⚠️ Approving USDC for {spender_address}...")
+        tx = usdc.functions.approve(spender_address, amount_wei).build_transaction({
+            'from': account.address,
+            'nonce': w3.eth.get_transaction_count(account.address),
+            'gasPrice': w3.eth.gas_price,
+            'chainId': CHAIN_ID
+        })
+        signed = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+        tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+        print(f"⏳ Approval sent: {tx_hash.hex()}")
+        w3.eth.wait_for_transaction_receipt(tx_hash)
+        print("✅ Approved")
+    else:
+        print("✅ Allowance OK")
+        
+    return True
+
+# ==========================================
+# EXECUTION
+# ==========================================
+
+def execute_trade():
+    print(f"\n🚀 STARTING TRADE: {TRADE_SIDE} {TRADE_SIZE_SHARES} shares @ {TRADE_PRICE_CENTS}¢")
+    
+    try:
+        # 1. Login
+        session, user_data = authenticate()
+        
+        # 2. Get Market Info
+        print(f"📊 Fetching market: {MARKET_SLUG}")
+        market = requests.get(f"{API_BASE_URL}/markets/{MARKET_SLUG}").json()
+        venue = market["venue"]["exchange"]
+        token_id = market["tokens"][TRADE_SIDE.lower()]
+        
+        # 3. Calculate Amounts
+        price_usd = TRADE_PRICE_CENTS / 100
+        maker_amount = int(price_usd * TRADE_SIZE_SHARES * 1e6) # USDC
+        taker_amount = int(TRADE_SIZE_SHARES * 1e6)             # Shares
+        
+        # 4. Approve USDC
+        if not check_and_approve_usdc(venue, maker_amount):
+            return
+
+        # 5. Prepare Order
+        salt = int(time.time() * 1000) + (86400 * 1000)
+        domain = {"name": "Limitless CTF Exchange", "version": "1", "chainId": CHAIN_ID, "verifyingContract": venue}
+        types = {
+            "Order": [
+                {"name": "salt", "type": "uint256"},
+                {"name": "maker", "type": "address"},
+                {"name": "signer", "type": "address"},
+                {"name": "taker", "type": "address"},
+                {"name": "tokenId", "type": "uint256"},
+                {"name": "makerAmount", "type": "uint256"},
+                {"name": "takerAmount", "type": "uint256"},
+                {"name": "expiration", "type": "uint256"},
+                {"name": "nonce", "type": "uint256"},
+                {"name": "feeRateBps", "type": "uint256"},
+                {"name": "side", "type": "uint8"},
+                {"name": "signatureType", "type": "uint8"},
+            ]
+        }
+        message = {
+            "salt": salt,
+            "maker": account.address,
+            "signer": account.address,
+            "taker": "0x0000000000000000000000000000000000000000",
+            "tokenId": int(token_id),
+            "makerAmount": maker_amount,
+            "takerAmount": taker_amount,
+            "expiration": 0,
+            "nonce": 0,
+            "feeRateBps": user_data.get("rank", {}).get("feeRateBps", 0),
+            "side": 0, # 0 for BUY
+            "signatureType": 0,
+        }
+        
+        # 6. Sign Order
+        print("✍️ Signing order...")
+        encoded = encode_typed_data(domain, types, message)
+        signature = account.sign_message(encoded).signature.hex()
+        
+        # 7. Submit Order
+        payload = {
+            "order": {
+                **message,
+                "price": price_usd,
+                "signature": signature
+            },
+            "ownerId": int(user_data["id"]),
+            "orderType": "GTC",
+            "marketSlug": MARKET_SLUG
+        }
+        
+        print("📤 Submitting order...")
+        res = requests.post(f"{API_BASE_URL}/orders", headers=get_headers(session), json=payload)
+        
+        if res.status_code == 201:
+            print(f"✅ ORDER SUCCESS: {res.json()['id']}")
+        else:
+            print(f"❌ ORDER FAILED: {res.text}")
+
+    except Exception as e:
+        print(f"❌ ERROR: {e}")
+
+if __name__ == "__main__":
+    execute_trade()
